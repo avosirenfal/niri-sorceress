@@ -149,8 +149,6 @@ async fn main() -> std::io::Result<()> {
     loop {
         let event = read_event(&mut reader).await?;
 
-        println!("{:?}", event);
-
         state.apply(event);
 
         last = emit(&state, last);
