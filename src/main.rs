@@ -78,6 +78,11 @@ where T: Serialize + ?Sized {
     hasher.finish()
 }
 
+fn print_empty() -> u64 {
+    println!("{}", r#"{"focused_window":null,"windows":[]}"#);
+    0
+}
+
 fn emit(state: &EventStreamState, last: u64) -> u64 {
     let focused_workspace_opt =
         state.workspaces.workspaces.iter().find(
@@ -85,9 +90,7 @@ fn emit(state: &EventStreamState, last: u64) -> u64 {
         );
 
     let Some(focused_workspace) = focused_workspace_opt else {
-        // if there's no focused workspace emit empty
-        println!("[]");
-        return 0;
+        return print_empty();
     };
 
     let windows: Vec<_> = state.windows.windows.values()
@@ -101,8 +104,7 @@ fn emit(state: &EventStreamState, last: u64) -> u64 {
     }
 
     if windows.len() == 0 {
-        println!("[]");
-        return 0;
+        return print_empty();
     }
 
     let mut filtered_windows = windows
