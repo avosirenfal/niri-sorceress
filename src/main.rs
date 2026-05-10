@@ -1,22 +1,21 @@
 mod icon;
 
-use std::env;
-use std::ops::Deref;
-use std::path::PathBuf;
+use crate::icon::get_app_icon_path;
 use niri_ipc::state::{EventStreamState, EventStreamStatePart};
-use niri_ipc::{Event, Reply, Request, Response, Window, Workspace};
+use niri_ipc::{Event, Reply, Request, Response, Window};
+use serde::Serialize;
+use std::env;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use serde::{Deserialize, Serialize};
-use crate::icon::get_app_icon_path;
 
-/// Connect to the niri socket and return a buffered async reader/writer pair.
 async fn connect() -> std::io::Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf)> {
     let socket_path = env::var_os("NIRI_SOCKET").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "NIRI_SOCKET is not set — are you running inside niri?",
+            "NIRI_SOCKET is not set - are you running inside niri?",
         )
     })?;
 
@@ -25,7 +24,6 @@ async fn connect() -> std::io::Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf)
     Ok((BufReader::new(read_half), write_half))
 }
 
-/// Send one JSON-encoded request and read the reply.
 async fn send_request(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut OwnedWriteHalf,
@@ -41,7 +39,6 @@ async fn send_request(
     Ok(reply)
 }
 
-/// Read one event from the open event stream.
 async fn read_event(
     reader: &mut BufReader<OwnedReadHalf>,
 ) -> std::io::Result<Event> {
@@ -57,18 +54,28 @@ async fn read_event(
     Ok(event)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct NiriWindowInfo {
-    icon: PathBuf,
+#[derive(Serialize, Debug)]
+struct NiriWindowInfo<'a> {
     // #[serde(skip_serializing_if = "Option::is_none")]
-    window: Window,
+    icon: Option<PathBuf>,
+    window: &'a Window,
+}
+
+fn hash<T>(items: &[&T]) -> u64
+where T: Serialize + ?Sized {
+    let mut hasher = DefaultHasher::new();
+
+    if let Ok(bytes) = postcard::to_allocvec(&items) {
+        bytes.hash(&mut hasher);
+    }
+
+    hasher.finish()
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let (mut reader, mut writer) = connect().await?;
 
-    // ── 1. Request the event stream ───────────────────────────────────────────
     let reply = send_request(&mut reader, &mut writer, &Request::EventStream).await?;
     match reply {
         Ok(Response::Handled) => {}
@@ -83,20 +90,10 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    // After switching to event-stream mode the write half is no longer used.
     drop(writer);
 
-    // ── 2. Accumulate state ───────────────────────────────────────────────────
-    // EventStreamState tracks all compositor state by applying incoming events.
-    // It provides six sub-states:
-    //   .workspaces  – HashMap<u64, Workspace>
-    //   .windows     – HashMap<u64, Window>
-    //   .keyboard_layouts – Option<KeyboardLayouts>
-    //   .overview    – bool (is_open)
-    //   .config      – bool (failed)
-    //   .casts       – HashMap<u64, Cast>
     let mut state = EventStreamState::default();
-    let mut last: Option<String> = None;
+    let mut last: u64 = 0;
 
     loop {
         let event = read_event(&mut reader).await?;
@@ -118,7 +115,8 @@ async fn main() -> std::io::Result<()> {
             );
 
         let Some(focused_workspace) = focused_workspace_opt else {
-            // emit empty
+            // if there's no focused workspace emit empty
+            println!("[]");
             continue
         };
 
@@ -126,21 +124,35 @@ async fn main() -> std::io::Result<()> {
             .filter(|w| w.workspace_id == Some(*focused_workspace.0))
             .collect();
 
-        let Ok(result) = serde_json::to_string(&windows)
-            .inspect_err(|err| println!("failed serializing windows: {}", err))
+        let check = hash(&windows);
+
+        if check == last {
+            continue;
+        }
+
+        last = check;
+
+        let mut send = windows
+            .iter()
+            .map(|&it| {
+                NiriWindowInfo {
+                    window: it,
+                    icon: it.app_id.as_ref().and_then(|it| get_app_icon_path(&it, 16)),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        send.sort_by_key(|w| w.window.layout.pos_in_scrolling_layout);
+
+        let result = serde_json::to_string(&send);
+
+        let Ok(result) = result
+            .inspect_err(|err| eprintln!("failed serializing windows: {}", err))
         else {
             continue;
         };
 
-        // pos_in_scrolling_layout
-        if last.as_ref().is_some_and(|it| *it != result) || last.is_none() {
-            // println!("{}", result);
-            windows.iter()
-                .filter_map(|it| it.app_id.as_ref())
-                .filter_map(|it| get_app_icon_path(it, 16))
-                .for_each(|it| println!("{}", it.display()));
-            last = Some(result);
-        }
+        println!("{}", result);
     }
 }
 
