@@ -72,6 +72,57 @@ where T: Serialize + ?Sized {
     hasher.finish()
 }
 
+fn emit(state: &EventStreamState, last: u64) -> u64 {
+    let focused_workspace_opt =
+        state.workspaces.workspaces.iter().find(
+            |&it| it.1.is_focused
+        );
+
+    let Some(focused_workspace) = focused_workspace_opt else {
+        // if there's no focused workspace emit empty
+        println!("[]");
+        return 0;
+    };
+
+    let windows: Vec<_> = state.windows.windows.values()
+        .filter(|w| w.workspace_id == Some(*focused_workspace.0))
+        .collect();
+
+    let check = hash(&windows);
+
+    if check == last {
+        return check;
+    }
+
+    if windows.len() == 0 {
+        return 0;
+    }
+
+    let mut send = windows
+        .iter()
+        .map(|&it| {
+            NiriWindowInfo {
+                window: it,
+                icon: it.app_id.as_ref().and_then(|it| get_app_icon_path(&it, 16)),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    send.sort_by_key(|w| w.window.layout.pos_in_scrolling_layout);
+
+    let result = serde_json::to_string(&send);
+
+    let Ok(result) = result
+        .inspect_err(|err| eprintln!("failed serializing windows: {}", err))
+    else {
+        return check;
+    };
+
+    println!("{}", result);
+
+    check
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let (mut reader, mut writer) = connect().await?;
@@ -93,66 +144,16 @@ async fn main() -> std::io::Result<()> {
     drop(writer);
 
     let mut state = EventStreamState::default();
-    let mut last: u64 = 0;
+    let mut last: u64 = emit(&state, 0);
 
     loop {
         let event = read_event(&mut reader).await?;
-        let should_emit = matches!(
-            event,
-            Event::WorkspacesChanged { .. } | Event::WorkspaceActivated { .. } |
-            Event::WindowOpenedOrChanged { .. } | Event::WindowFocusChanged { .. }
-        );
+
+        println!("{:?}", event);
 
         state.apply(event);
 
-        if !should_emit {
-            continue;
-        }
-
-        let focused_workspace_opt =
-            state.workspaces.workspaces.iter().find(
-                |&it| it.1.is_focused
-            );
-
-        let Some(focused_workspace) = focused_workspace_opt else {
-            // if there's no focused workspace emit empty
-            println!("[]");
-            continue
-        };
-
-        let windows: Vec<_> = state.windows.windows.values()
-            .filter(|w| w.workspace_id == Some(*focused_workspace.0))
-            .collect();
-
-        let check = hash(&windows);
-
-        if check == last {
-            continue;
-        }
-
-        last = check;
-
-        let mut send = windows
-            .iter()
-            .map(|&it| {
-                NiriWindowInfo {
-                    window: it,
-                    icon: it.app_id.as_ref().and_then(|it| get_app_icon_path(&it, 16)),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        send.sort_by_key(|w| w.window.layout.pos_in_scrolling_layout);
-
-        let result = serde_json::to_string(&send);
-
-        let Ok(result) = result
-            .inspect_err(|err| eprintln!("failed serializing windows: {}", err))
-        else {
-            continue;
-        };
-
-        println!("{}", result);
+        last = emit(&state, last);
     }
 }
 
