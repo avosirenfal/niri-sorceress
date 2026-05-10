@@ -103,7 +103,7 @@ fn emit(state: &EventStreamState, last: u64) -> u64 {
         .map(|&it| {
             NiriWindowInfo {
                 window: it,
-                icon: it.app_id.as_ref().and_then(|it| get_app_icon_path(&it, 16)),
+                icon: it.app_id.as_ref().and_then(|it| get_app_icon_path(&it, 32)),
             }
         })
         .collect::<Vec<_>>();
