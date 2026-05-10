@@ -61,6 +61,12 @@ struct NiriWindowInfo<'a> {
     window: &'a Window,
 }
 
+#[derive(Serialize, Debug)]
+struct NiriInfo<'a> {
+    focused_window: Option<u64>,
+    windows: &'a[NiriWindowInfo<'a>],
+}
+
 fn hash<T>(items: &[&T]) -> u64
 where T: Serialize + ?Sized {
     let mut hasher = DefaultHasher::new();
@@ -95,10 +101,11 @@ fn emit(state: &EventStreamState, last: u64) -> u64 {
     }
 
     if windows.len() == 0 {
+        println!("[]");
         return 0;
     }
 
-    let mut send = windows
+    let mut filtered_windows = windows
         .iter()
         .map(|&it| {
             NiriWindowInfo {
@@ -108,9 +115,17 @@ fn emit(state: &EventStreamState, last: u64) -> u64 {
         })
         .collect::<Vec<_>>();
 
-    send.sort_by_key(|w| w.window.layout.pos_in_scrolling_layout);
+    filtered_windows.sort_by_key(|w| w.window.layout.pos_in_scrolling_layout);
 
-    let result = serde_json::to_string(&send);
+    let info = NiriInfo {
+        focused_window: filtered_windows
+            .iter()
+            .find(|it| it.window.is_focused)
+            .and_then(|it| Some(it.window.id)),
+        windows: &filtered_windows,
+    };
+
+    let result = serde_json::to_string(&info);
 
     let Ok(result) = result
         .inspect_err(|err| eprintln!("failed serializing windows: {}", err))
@@ -148,6 +163,7 @@ async fn main() -> std::io::Result<()> {
 
     loop {
         let event = read_event(&mut reader).await?;
+        // println!("{:?}", event);
 
         state.apply(event);
 
